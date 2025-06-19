@@ -61,4 +61,106 @@ with st.expander("Input Data Manual"):
             except ValueError:
                 st.warning(f"Format tanggal/waktu tidak valid untuk kegagalan #{i+1}. Harap gunakan YYYY-MM-DD HH:MM:SS.")
             except Exception as e:
-                st.error(f"Terjadi kesalahan tak terduga saat memproses keg
+                st.error(f"Terjadi kesalahan tak terduga saat memproses kegagalan #{i+1}: {e}")
+
+# Membuat DataFrame dari data manual
+df_manual = pd.DataFrame(manual_failure_data)
+
+# Menggunakan file upload untuk data CSV
+st.subheader("Atau, Unggah File CSV")
+uploaded_file = st.file_uploader("Pilih file CSV", type=["csv"])
+
+df_uploaded = pd.DataFrame()
+if uploaded_file is not None:
+    try:
+        df_uploaded = pd.read_csv(uploaded_file)
+        # Memastikan kolom yang ada di CSV sesuai dan mengonversinya ke datetime
+        if 'Start Time' in df_uploaded.columns and 'End Time' in df_uploaded.columns:
+            df_uploaded['Start Time'] = pd.to_datetime(df_uploaded['Start Time'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
+            df_uploaded['End Time'] = pd.to_datetime(df_uploaded['End Time'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
+            
+            # Hapus baris dengan nilai NaT (Not a Time) jika parsing gagal
+            df_uploaded.dropna(subset=['Start Time', 'End Time'], inplace=True)
+
+            # Validasi: Waktu perbaikan harus setelah waktu kegagalan untuk data CSV
+            df_uploaded = df_uploaded[df_uploaded['End Time'] >= df_uploaded['Start Time']]
+
+            if df_uploaded.empty:
+                st.warning("Tidak ada data yang valid di file CSV setelah filtering (periksa format waktu atau urutan waktu).")
+
+        else:
+            st.error("File CSV harus memiliki kolom 'Start Time' dan 'End Time'.")
+            df_uploaded = pd.DataFrame() # Kosongkan df_uploaded jika kolom tidak sesuai
+    except Exception as e:
+        st.error(f"Terjadi kesalahan saat membaca atau memproses file CSV: {e}")
+        df_uploaded = pd.DataFrame() # Kosongkan df_uploaded jika ada error
+
+# Gabungkan data manual dan data dari CSV
+df = pd.concat([df_manual, df_uploaded], ignore_index=True)
+
+# Hapus duplikat berdasarkan Start Time dan End Time jika ada
+df.drop_duplicates(subset=['Start Time', 'End Time'], inplace=True)
+df.sort_values(by='Start Time', inplace=True) # Urutkan berdasarkan waktu mulai kegagalan
+
+# --- Tampilan Data dan Perhitungan ---
+if not df.empty:
+    st.subheader("Data Kegagalan yang Digunakan untuk Perhitungan:")
+    st.dataframe(df)
+
+    # --- Perhitungan MTTR ---
+    df['Repair Time'] = (df['End Time'] - df['Start Time']).dt.total_seconds() / 3600 # dalam jam
+    total_repair_time = df['Repair Time'].sum()
+    num_failures_actual = len(df)
+
+    if num_failures_actual > 0:
+        mttr = total_repair_time / num_failures_actual
+        st.subheader("2. Hasil Perhitungan MTTR")
+        st.metric(label="MTTR (Mean Time To Repair)", value=f"{mttr:.2f} Jam")
+        st.write(f"Diambil dari total {total_repair_time:.2f} jam perbaikan dibagi dengan {num_failures_actual} kegagalan.")
+        st.write("MTTR adalah waktu rata-rata yang dibutuhkan untuk memperbaiki sistem yang gagal.")
+    else:
+        st.warning("Tidak ada data kegagalan yang valid untuk menghitung MTTR.")
+
+    # --- Perhitungan MTBF ---
+    if num_failures_actual > 1:
+        # Untuk MTBF, kita perlu total waktu operasional (uptime)
+        # Total durasi periode observasi = (Waktu terakhir selesai perbaikan) - (Waktu pertama mulai kegagalan)
+        observation_period_seconds = (df['End Time'].max() - df['Start Time'].min()).total_seconds()
+        
+        # Total waktu perbaikan dalam detik
+        total_repair_time_seconds = df['Repair Time'].sum() * 3600 
+        
+        # Total waktu operasional = Total durasi periode - Total waktu perbaikan
+        total_operational_time_seconds = observation_period_seconds - total_repair_time_seconds
+        
+        # Pastikan waktu operasional tidak negatif (bisa terjadi jika data aneh)
+        if total_operational_time_seconds < 0:
+            st.error("Perhitungan waktu operasional menghasilkan nilai negatif. Mohon periksa data kegagalan Anda (misalnya, tumpang tindih waktu perbaikan atau durasi perbaikan yang sangat panjang).")
+            mtbf = 0 # Atau tangani sesuai kebutuhan
+        else:
+            # MTBF = Total Waktu Operasional / (Jumlah Kegagalan - 1)
+            # Karena ada N kegagalan, ada N-1 interval antar kegagalan.
+            mtbf = total_operational_time_seconds / (num_failures_actual - 1) / 3600 # dalam jam
+            
+            st.subheader("3. Hasil Perhitungan MTBF")
+            st.metric(label="MTBF (Mean Time Between Failures)", value=f"{mtbf:.2f} Jam")
+            st.write(f"Diambil dari total {total_operational_time_seconds / 3600:.2f} jam waktu operasional dibagi dengan {num_failures_actual - 1} interval antar kegagalan.")
+            st.write("MTBF adalah waktu rata-rata yang diharapkan antara dua kegagalan berturut-turut dalam sistem.")
+            
+            st.info(
+                f"**Detail Perhitungan MTBF:**\n"
+                f"- Durasi Periode Observasi: {observation_period_seconds / 3600:.2f} Jam (dari kegagalan pertama hingga perbaikan terakhir)\n"
+                f"- Total Waktu Perbaikan: {total_repair_time_seconds / 3600:.2f} Jam\n"
+                f"- Total Waktu Operasional (Uptime): {total_operational_time_seconds / 3600:.2f} Jam\n"
+                f"- Jumlah Interval Kegagalan: {num_failures_actual - 1}"
+            )
+    elif num_failures_actual == 1:
+        st.info("Diperlukan setidaknya dua data kegagalan untuk menghitung MTBF.")
+    else:
+        st.warning("Tidak ada data kegagalan yang valid untuk menghitung MTBF.")
+
+else:
+    st.info("Silakan masukkan data kegagalan secara manual atau unggah file CSV untuk memulai perhitungan.")
+
+st.markdown("---")
+st.markdown("Dibuat dengan ❤️ menggunakan Streamlit")
